@@ -1,14 +1,37 @@
 import socket
 import sys
+import threading
+import logging
 
+logging.basicConfig(level=logging.DEBUG,
+                    format='(%(threadName)-2s) %(message)s')
+
+class jugador: # Clase auxiliar para el acceso a valores del jugador entre diferentes hilos
+
+    def __init__(self):
+        self.turno = None
+        self.cadenaEnviar = None
+        self.simbolo = None
+        self.recibido = None
+        self.tamTablero = None
+        self.continuar = True
+        self.condicionRecibo = threading.Condition()
+        self.condicionEnvio = threading.Condition()
+    
+    def inicializar(self, turno, simbolo, tamTablero):
+        self.turno = turno
+        self.simbolo = simbolo
+        #self.tiro = tiro
+        self.tam = tamTablero
 
 def recibirTablero(sock, tamTablero):
     s = sock.recv(512).decode("utf-8")  # control simbolo tablero
-    print('R: ',s)
-    print('Tablero actual')
-    print('____________________')
-    imprimirTablero(s[2:], tamTablero)  # imprime el tablero recibido
-    print('\n____________________')
+    #print('R: ',s)
+    if s[0] == '0' or s[0] == '1' or s[0] =='2':
+        print('Tablero actual')
+        print('____________________')
+        imprimirTablero(s[2:], tamTablero)  # imprime el tablero recibido
+        print('\n____________________')
     return s[0:2]                       # retorna la porcion de control de la cadena
 
 def enviarTiro(sock, simbolo, par_coordenado):
@@ -23,6 +46,22 @@ def imprimirTablero(s, tam):
             print("\n")
         print("{} \t".format(s[i]), end="", flush=True)
 
+def escuchar(sock, yo):
+    while yo.continuar:
+        logging.debug('Esperando mensajes del servidor')
+        yo.recibido = recibirTablero(sock, yo.tamTablero)    # Espera e imprime el tablero. codigo indica el estado del juego
+        with yo.condicionRecibo:
+            logging.debug('Mensaje recibido {} notificando al hilo principal'.format(yo.recibido))
+            yo.condicionRecibo.notify()                        # Despierta al hilo principal cuando se han recibido datos
+
+def enviar(sock, yo):
+    while yo.continuar:
+        with yo.condicionEnvio:
+            logging.debug('Esperando notificacion del hilo principal para enviar datos')
+            yo.condicionEnvio.wait() # Espera al hilo principal para enviar los datos
+        logging.debug('Notificación recibida, enviando datos')
+        sock.sendall(yo.cadenaEnviar.encode())
+        
 
 def main():
     # Argumentos de ejecución
@@ -31,53 +70,62 @@ def main():
         sys.exit(1)
     ip, puerto = sys.argv[1:3]
     dirServidor = (ip, int(puerto))
-
-    turno = 1
+    yo = jugador()
 
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as SocketCliente: # Creación del socket
-        print('Conectando al servidor...')
         SocketCliente.connect(dirServidor) # Conexión del socket
-        print('Conectado')
+        logging.debug('Conectado al servidor')
+        hilo_escuchar = threading.Thread(target=escuchar, args=[SocketCliente, yo])# Crear hilo de escucha
+        hilo_enviar = threading.Thread(target=enviar, args=[SocketCliente, yo])# Crear hilo de escucha
+        hilo_escuchar.start() # Comienza a escuchar
+        hilo_enviar.start() # Comenza a esperar una solicitud de envío
+        logging.debug('Hilos de comunicación creados')
 
-        # Inicia el juego
-        miturno = int(SocketCliente.recv(512).decode('utf-8')) # Recibe el turno por oden de conexión
+        # En el hilo principal
 
-        if miturno == 0:
-            print('Elija la dificultad del juego: \n 1) 3x3\n 2) 5x5')
-            dificultad = int(input())                           # Ingresar la dificultad
-            tam = dificultad * 2 + 1                            # Convertir a un numero impar
-            SocketCliente.sendall(str(tam).encode())            # Envía la dificultad al servidor
-
-        misimbolo = input()                                     #'x' Ingresar simbolo
-        SocketCliente.sendall(misimbolo.encode())               # Enviar simbolo
-
-        continuar = True                                        # Variable para detener el juego
-
-        while continuar:                                        # Enviar y recibir tiros
-
-            codigo = recibirTablero(SocketCliente, tam)         # Espera e imprime el tablero. codigo indica el estado del juego
-
-            if codigo[0] == '0':                                # Seguir jugando
-                if codigo[1] == misimbolo:                      # Si es mi turno
+        while yo.continuar: # while juego_continua
+            with yo.condicionRecibo:
+                logging.debug('Esperando al hilo que recibe datos')
+                yo.condicionRecibo.wait() # Espera una notificación del hilo de escucha
+            
+            if yo.recibido[0] == '0':                                  # Seguir jugando
+                if yo.recibido[1] == yo.simbolo:                  # Si es mi turno
                     print('Su turno. Ingrese las coordenadas de su tiro: ')
-                    tiro = input()
-                    enviarTiro(SocketCliente, misimbolo, tiro)  # enviar tiro
-                else:                                           # Si no es mi turno
-                    print('Jugador {} ha tirado'.format(codigo[1])) # Indica que
-            elif codigo[0] == '1':                              # El juego termina
-                print('{} gana'.format(codigo[1]))
+                    yo.cadenaEnviar = yo.simbolo + ',' + input()
+                    with yo.condicionEnvio:
+                        yo.condicionEnvio.notify()                         # Despierta al hilo de envío
+                else:                                                       # Si no es mi turno
+                    print('Jugador {} ha tirado'.format(yo.recibido[1])) # Indica el tiro que hizo otro jugador
+
+            elif yo.recibido[0] == '1':                                # El juego termina
+                print('{} gana'.format(yo.recibido[1]))
                 continuar = False
+
+            elif yo.recibido[0] == '3':                                # Guardar turno asignado
+                yo.turno = int(yo.recibido[1:])
+
+            elif yo.recibido[0] == '4':                                # Enviar simbolo
+                print('Ingrese el caracter que quiera usar en el tablero')
+                yo.cadenaEnviar = input()
+                with yo.condicionEnvio:
+                    yo.condicionEnvio.notify()                             # Despierta al hilo de envío
+
+            elif yo.recibido[0] == '5':                                # Enviar tamaño del tablero
+                print('Ingrese la dificultad del juego:\n1) 3x3\n2) 5x5')
+                tam = int(input())*2+1
+                yo.cadenaEnviar = '{}'.format(tam)
+                yo.tamTablero = tam
+                with yo.condicionEnvio:
+                    yo.condicionEnvio.notify()                             # Despierta al hilo de envío
+
             else: # Error
-                if codigo[1] == misimbolo:
+                if yo.recibido[1] == yo.simbolo:
                     print('Error en la cadena enviada, intente de nuevo')
-                    tiro = input()
-                    enviarTiro(SocketCliente, misimbolo, tiro)
+                    yo.cadenaEnviar = input()
+                    with yo.condicionEnvio:
+                        yo.condicionEnvio.notify()
                 else:
                     pass
-
-        duracion = SocketCliente.recv(512).decode("utf-8")  # Recibir duración del juego
-        print('El juego ha durado ' + duracion + 'segundos')
-        # FIN
 
 
 if __name__ == '__main__':

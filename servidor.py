@@ -3,21 +3,25 @@ import socket
 import sys
 import random
 import threading
+import logging
 
+logging.basicConfig(level=logging.DEBUG,
+                    format='(%(threadName)-2s) %(message)s')
 
 class Gato:
 
-    def __init__(self): # Crea un objeto base, sin valores en sus atributos
+    def __init__(self, num_jugadores): # Crea un objeto base, sin valores en sus atributos
         self.tiempoInicio = None
         self.tiempoFin = None
         self.tam = None
-        self.numJugadores = None
+        self.numJugadores = num_jugadores
         self.tablero = None
         self.turno = None
         self.numTiros = None
         self.tiros_maximos = None
         self.simbolos = []
-        self.lista_conexiones = []  # Lista vacía donde se guardará los sockets para la conexión con los clientes
+        self.lista_conexiones = []  # Lista vacía donde se guardará los sockets para la conexión con los 
+        self.barrera = threading.Barrier(num_jugadores) # Barrera para esperar a la conexion de todos los clientes
 
 
     def inicializar(self, siz):                          # Crea el tablero con el tamaño indicado
@@ -38,7 +42,8 @@ class Gato:
         else:
             self.turno = 0
 
-    # def agregarJugador(self, simbolo):
+    def agregarSimbolo(self, simbolo):
+        self.simbolos.append(simbolo)
 
 
     def tirar(self, jg, coord):                             # Plasma el simbolo del jugador indicado en las coordeneadas ingresadas
@@ -157,6 +162,7 @@ def recibirTiro(sock, juego):
 
 
 def enviar(sock, cadena):
+    logging.debug("No hay espacio para mangas")
     cadena = str(cadena).encode()
     sock.sendall(cadena)
 
@@ -166,57 +172,49 @@ def funcion_cliente(client_conn, juego, num_cliente): # Ejecuta la instancia que
     # el objeto Gato que contiene los datos del juego,
     # el numero de conexión correspondiente al cliente
 
-    with client_conn: # Cuando el juego termina, cierra la conexión con el cliente
-        print(num_cliente)
-        client_conn.sendall(str(num_cliente).encode())  # Enviar turno asignado al cliente
+    with client_conn:
+        client_conn.sendall('3{}'.format(num_cliente).encode())# Enviar turno al cliente
 
-        if num_cliente == 0: # Si es el primer cliente en conectarse
-            tam = int(((client_conn.recv(512)).decode('utf-8')))  # Espera la dificultad
-            juego.inicializar(tam)  # Modifica el objeto
-            print('Juego creado tablero {}x{}'.format(tam, tam))
+        if num_cliente == 0:                                    # Si es el primer cliente
+            logging.debug('El  primer cliente se ha conectado')
+            client_conn.sendall('5'.encode())                   # Pide la dificultad
+            tam = int(client_conn.recv(512).decode('utf-8'))    # Recibe la dificultad
+            juego.inicializar(tam)                              # inicializa el objeto de la partida
 
-        continuar = True
+        logging.debug('Pidiendo simbolo al cliente')
+        client_conn.sendall('4'.encode())                       # Pide simbolo al cliente
+        misimbolo = client_conn.recv(64).decode('utf-8')[0]     # Recibe el simbolo del cliente
+        logging.debug('El cliente eligio el simbolo: {}'.format(misimbolo))
+        # ¿Adquiere candado?
+        juego.agregarSimbolo(misimbolo)                         # Registra el simbolo en el objeto del juego
+        logging.debug('Simbolo guadado {}'.format(juego.simbolos))
+        # ¿Libera candado?
 
-        juego.enviarTablero(client_conn, '0' + juego.simbolos[juego.turno]) # Envía el tablero inicial a todos los clientes
+        logging.debug('Esperando la conexión de los clientes restantes')
+        juego.barrera.wait()                                    # Espera a que todos los clientes estén listos
+        juego.enviarTablero(client_conn, '0' + juego.simbolos[juego.turno]) # Envía el primer tablero a todos
+        
+        juego_continua = True # Comienza el juego
 
-        while continuar:  # Recibe y envía tiros
+        while juego_continua: # while juego_continua
 
-            if juego.simbolos[juego.turno] == 'x':  # Turno del cliente
-                print('Turno del cliente')
-                r = recibirTiro(client_conn, juego)  # Analiza la cadena del cliente
-                if r[0] == '0':
-                    # juego.cambiarTurno()
-                    juego.enviarTablero(client_conn, r)
-                    print('Tiro registrado, el juego continúa')
-                elif r[0] == '1':
-                    print('{} gana'.format(r[1]))
-                    juego.enviarTablero(client_conn, r)  # Envía tablero al cliente
-                    continuar = False
-                else:
-                    juego.enviarTablero(client_conn, r)  # Error en la cadena recibida
-                    print('Error en los datos recibidos')
+            # ¿Adquiere el candado?
+            control = recibirTiro(client_conn, juego) # procesa lo recibido, bloqueante hasta que reciba algo
+            juego.enviarTableroaTodos(client_conn, juego) # Envía respuesta a todos
+            # ¿Libera el candado?
 
-            else:  # Turno del cpu
-                print('Turno del CPU')
-                if r[0] == '0':
-                    r = juego.cpu()
-                    # juego.cambiarTurno()
-                    print('Tiro de CPU registrado')
-                    juego.enviarTablero(client_conn, r)
-                    print('Tiro registrado, el juego continúa')
-                elif r[0] == '1':
-                    print('{} gana'.format(r[1]))
-                    juego.enviarTablero(client_conn, r)  # Envía tablero al cliente
-                    continuar = False
-        print('El juego ha terminado')
-        enviar(client_conn, '{:.2f}'.format(juego.tiempoFin - juego.tiempoInicio))  # Envía duración del juego
+            if control[0] == '1': # Checa si termina el juego
+                juego_continua = False
+            
+
+        #print('El juego ha terminado')
+        #enviar(client_conn, '{:.2f}'.format(juego.tiempoFin - juego.tiempoInicio))  # Envía duración del juego
 
 
 def main(): # Funcion principal
     ip = None
     puerto = None
     numero_jugadores = None
-    juego = Gato()  # Objeto gato vacío
     lista_hilos = []
 
     if len(sys.argv) != 4:          # Si no hay argumentos asigna la direccion local
@@ -227,27 +225,28 @@ def main(): # Funcion principal
         numero_jugadores = int(sys.argv[3])
 
     dirServidor = (ip, int(puerto))
-    juego.numJugadores = numero_jugadores
+    juego = Gato(numero_jugadores)  # Objeto gato vacío
 
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as SocketServidor:   # Crea el socket
         SocketServidor.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)    # Opciones adicionales del socket
         SocketServidor.bind(dirServidor)                                        # Ligar socket a la dirección
         SocketServidor.listen(numero_jugadores)                                 # Espera conexion
+        #SocketServidor.setblocking(False)
 
-        print("El servidor TCP está disponible y en espera de solicitudes")
+        logging.debug('El servidor TCP está disponible y en espera de solicitudes')
 
         # Creación de hilos por cada conexión
         try:
-            for n in range(numero_jugadores): # Espera 'numero_jugadores' conexiones
-                client_conn, client_addr = SocketServidor.accept()               # Aceptar al cliente
-                juego.lista_conexiones.append(client_conn)  # Agrega el socket a la lista de conexiones del juego
-                print("Conectado a", client_addr)
+            for n in range(numero_jugadores):                                       # Espera 'numero_jugadores' conexiones
+                client_conn, client_addr = SocketServidor.accept()                  # Aceptar al cliente
+                juego.lista_conexiones.append(client_conn)                          # Agrega el socket a la lista de conexiones del juego
+                logging.debug('Conectado a'.format(client_addr))
                 hilo_cliente = threading.Thread(target=funcion_cliente, args=[client_conn, juego, n]) # Crear hilo para el cliente
                 hilo_cliente.start() # Iniciar el hilo
                 lista_hilos.append(hilo_cliente)
         except Exception as e:
             print(e)
-        print('El juego ha terminado. Cerrando todos los hilos')
+        logging.debug('Todos los clientes conectados')
         for c in lista_hilos:
             c.join()
 
